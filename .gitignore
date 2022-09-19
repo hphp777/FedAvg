@@ -1,0 +1,9 @@
+models/
+
+pickles/
+
+result/
+
+*.txt
+
+*.csv
