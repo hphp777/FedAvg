@@ -13,6 +13,42 @@ from sklearn.metrics import roc_auc_score
 
 import config
 
+device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+
+def get_weighted_loss(pos_weights, neg_weights, epsilon=1e-7):
+    """
+    Return weighted loss function given negative weights and positive weights.
+
+    Args:
+      pos_weights (np.array): array of positive weights for each class, size (num_classes)
+      neg_weights (np.array): array of negative weights for each class, size (num_classes)
+    
+    Returns:
+      weighted_loss (function): weighted loss function
+    """
+    def weighted_loss(y_true, y_pred):
+        """
+        Return weighted loss value. 
+
+        Args:
+            y_true (Tensor): Tensor of true labels, size is (num_examples, num_classes)
+            y_pred (Tensor): Tensor of predicted labels, size is (num_examples, num_classes)
+        Returns:
+            loss (Float): overall scalar loss summed across all classes
+        """
+        # initialize loss to zero
+        loss = 0.0
+        
+        for i in range(len(pos_weights)):
+            # for each class, add average weighted loss for that class 
+            loss_pos = -1 * torch.mean(pos_weights[i] * y_true[:, i] * torch.log(y_pred[:, i] + epsilon))
+            loss_neg = -1 * torch.mean(neg_weights[i] * (1 - y_true[:, i]) * torch.log(1 - y_pred[:, i] + epsilon))
+            loss += loss_pos + loss_neg
+        return loss
+
+    return weighted_loss
+
+
 def get_roc_auc_score(y_true, y_probs):
     '''
     Uses roc_auc_score function from sklearn.metrics to calculate the micro ROC AUC score for a given y_true and y_probs.
@@ -34,8 +70,11 @@ def get_roc_auc_score(y_true, y_probs):
     useful_classes_roc_auc_list = []
     
     for i in range(y_true.shape[1]):
-        class_roc_auc = roc_auc_score(y_true[:, i], y_probs[:, i])
-        class_roc_auc_list.append(class_roc_auc)
+        try:
+            class_roc_auc = roc_auc_score(y_true[:, i], y_probs[:, i])
+        except:
+            return 0
+        class_roc_auc_list.append(class_roc_auc) 
         if i != NoFindingIndex:
             useful_classes_roc_auc_list.append(class_roc_auc)
     if True:
@@ -105,8 +144,41 @@ def get_resampled_train_val_dataloaders(XRayTrain_dataset, transform, bs):
     print('---------------------------------------------\n')
 
     return train_loader, val_loader
-    
-def train_epoch(device, train_loader, model, loss_fn, optimizer, epochs_till_now, final_epoch, log_interval):
+
+def transmitting_matrix(fm1, fm2):
+    if fm1.size(2) > fm2.size(2):
+        fm1 = F.adaptive_avg_pool2d(fm1, (fm2.size(2), fm2.size(3)))
+    fm1 = fm1.view(fm1.size(0), fm1.size(1), -1)
+    fm2 = fm2.view(fm2.size(0), fm2.size(1), -1).transpose(1, 2)
+
+    fsp = torch.bmm(fm1, fm2) / fm1.size(2)
+    return fsp
+
+def top_eigenvalue(K, n_power_iterations=10, dim=1):
+    v = torch.ones(K.shape[0], K.shape[1], 1).to(device)
+    for _ in range(n_power_iterations):
+        m = torch.bmm(K, v)
+        n = torch.norm(m, dim=1).unsqueeze(1)
+        v = m / n
+    top_eigenvalue = torch.sqrt(n / torch.norm(v, dim=1).unsqueeze(1))
+    return top_eigenvalue
+
+def make_divisible(v, divisor=8, min_value=1):
+    """
+    forked from slim:
+    https://github.com/tensorflow/models/blob/\
+    0344c5503ee55e24f0de7f37336a6e08f10976fd/\
+    research/slim/nets/mobilenet/mobilenet.py#L62-L69
+    """
+    if min_value is None:
+        min_value = divisor
+    new_v = max(min_value, int(v + divisor / 2) // divisor * divisor)
+    # Make sure that round down does not go down by more than 10%.
+    if new_v < 0.9 * v:
+        new_v += divisor
+    return new_v
+
+def train_epoch(device, train_loader, model, loss_fn, optimizer, epochs_till_now, final_epoch, log_interval, algorithm = None):
     '''
     Takes in the data from the 'train_loader', calculates the loss over it using the 'loss_fn' 
     and optimizes the 'model' using the 'optimizer'  
@@ -130,9 +202,14 @@ def train_epoch(device, train_loader, model, loss_fn, optimizer, epochs_till_now
         target = target.to(device)
         
         optimizer.zero_grad()    
-        out = model(img)        
-        loss = loss_fn(out, target)
-        running_train_loss += loss.item()*img.shape[0]
+        t_feats, out = model.extract_feature(img)
+        # out = model(img)  
+
+        # loss = loss_fn(out, target)
+        sig_out = sigmoid(out).cpu().detach().numpy()
+        loss = loss_fn(sig_out, target)
+        loss_ori = loss
+        running_train_loss += loss*img.shape[0]
         train_loss_list.append(loss.item())
 
         preds = np.round(sigmoid(out).cpu().detach().numpy())
@@ -144,6 +221,21 @@ def train_epoch(device, train_loader, model, loss_fn, optimizer, epochs_till_now
 
         loss.backward()
         optimizer.step()
+
+        if algorithm == 'FedAlign':
+            loss_CE = loss.item()
+
+            t = t_feats[-2].detach()
+            x2 = t[:, :make_divisible(t.shape[1]*0.25)] # 마지막 에서 두번 째 블록
+            x3 = model.layer4(t).detach()
+            s_feats = [x2, x3]
+            # s_feats = model.reuse_feature(t)
+            TM_s = torch.bmm(transmitting_matrix(s_feats[-2], s_feats[-1]), transmitting_matrix(s_feats[-2], s_feats[-1]).transpose(2,1)) # small block
+            TM_t = torch.bmm(transmitting_matrix(t_feats[-2].detach(), t_feats[-1].detach()), transmitting_matrix(t_feats[-2].detach(), t_feats[-1].detach()).transpose(2,1)) # big block
+            loss = F.mse_loss(top_eigenvalue(K=TM_s), top_eigenvalue(K=TM_t))
+            loss = 0.45*(loss_CE/loss.item())*loss
+            loss.requires_grad_(True)
+            loss.backward()
         
         if (batch_idx+1)%log_interval == 0:
             # batch metric evaluation
@@ -155,7 +247,7 @@ def train_epoch(device, train_loader, model, loss_fn, optimizer, epochs_till_now
 
             batch_time = time.time() - start_time
             m, s = divmod(batch_time, 60)
-            print('Train Loss for batch {}/{} @epoch{}/{}: {} in {} mins {} secs'.format(str(batch_idx+1).zfill(3), str(len(train_loader)).zfill(3), epochs_till_now, final_epoch, round(loss.item(), 5), int(m), round(s, 2)))
+            print('Train Loss for batch {}/{} @epoch{}/{}: {} in {} mins {} secs'.format(str(batch_idx+1).zfill(3), str(len(train_loader)).zfill(3), epochs_till_now, final_epoch, round(loss_ori.item() + loss.item(), 5), int(m), round(s, 2)))
         
         start_time = time.time()
 
@@ -224,10 +316,11 @@ def val_epoch(device, val_loader, model, loss_fn, epochs_till_now = None, final_
             batch_start_time = time.time()    
             
     # metric scenes
+    accuracy = correct/total
     print("Test Accuracy: ", correct/total)
     roc_auc = get_roc_auc_score(gt, probs)
 
-    return val_loss_list, running_val_loss/float(len(val_loader.dataset)), roc_auc
+    return val_loss_list, running_val_loss/float(len(val_loader.dataset)), roc_auc, accuracy
 
 def fit(device, XRayTrain_dataset, train_loader, val_loader, test_loader, model,
                                          loss_fn, optimizer, losses_dict,
@@ -245,15 +338,15 @@ def fit(device, XRayTrain_dataset, train_loader, val_loader, test_loader, model,
     if test_only:
         print('\n======= Testing... =======\n')
         test_start_time = time.time()
-        test_loss, mean_running_test_loss, test_roc_auc = val_epoch(device, test_loader, model, loss_fn, log_interval, test_only = test_only)
+        test_loss, mean_running_test_loss, test_roc_auc, test_acc = val_epoch(device, test_loader, model, loss_fn, log_interval, test_only = test_only)
         total_test_time = time.time() - test_start_time
         m, s = divmod(total_test_time, 60)
         print('test_roc_auc: {} in {} mins {} secs'.format(test_roc_auc, int(m), int(s)))
-        return test_roc_auc
+        return test_roc_auc, test_acc
         sys.exit()
 
     starting_epoch  = epochs_till_now
-    print('\n======= Training after epoch #{}... =======\n'.format(epochs_till_now))
+    # print('\n======= Training after epoch #{}... =======\n'.format(epochs_till_now))
 
     # epoch_train_loss = []
     # epoch_val_loss = []
@@ -274,7 +367,7 @@ def fit(device, XRayTrain_dataset, train_loader, val_loader, test_loader, model,
         print('TRAINING')
         train_loss, mean_running_train_loss          =  train_epoch(device, train_loader, model, loss_fn, optimizer, epochs_till_now, final_epoch, log_interval)
         print('VALIDATION')
-        val_loss, mean_running_val_loss, roc_auc     =  val_epoch(device, val_loader, model, loss_fn                             , epochs_till_now, final_epoch, log_interval)
+        val_loss, mean_running_val_loss, roc_auc, val_acc     =  val_epoch(device, val_loader, model, loss_fn                             , epochs_till_now, final_epoch, log_interval)
         
         epoch_train_loss.append(mean_running_train_loss)
         epoch_val_loss.append(mean_running_val_loss)

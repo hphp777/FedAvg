@@ -10,6 +10,6 @@ normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
 
 # transforms.RandomHorizontalFlip() not used because some disease might be more likely to the present in a specific lung (lelf/rigth)
 transform = transforms.Compose([transforms.ToPILImage(), 
-                    transforms.Resize(224),
+                    transforms.Resize(256),
                     transforms.ToTensor(),
                     normalize])

@@ -1,9 +1,11 @@
 import argparse
+from logging import BufferingFormatter
 import os, pdb, sys, glob, time
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
 import cv2
+import matplotlib.pyplot as plt
 
 import torch
 import torch.nn as nn
@@ -11,7 +13,7 @@ import torchvision.models as models
 from model.resnet import ResNet50_fedalign, ResNet50
 
 # import custom dataset classes
-from datasets import XRaysTrainDataset  ,ChestXLoader
+from datasets import XRaysTrainDataset  ,ChestXLoader, GANData
 from datasets import XRaysTestDataset
 
 # import neccesary libraries for defining the optimizers
@@ -28,6 +30,32 @@ def q(text = ''): # easy way to exiting the script. useful while debugging
     print('> ', text)
     sys.exit()
 
+class weighted_loss():
+
+    def __init__(self, pos_weights, neg_weights):
+        self.pos_weights = pos_weights
+        self.neg_weights = neg_weights
+
+    def __call__(self, y_true, y_pred, epsilon=1e-7):
+        """
+        Return weighted loss value. 
+
+        Args:
+            y_true (Tensor): Tensor of true labels, size is (num_examples, num_classes)
+            y_pred (Tensor): Tensor of predicted labels, size is (num_examples, num_classes)
+        Returns:
+            loss (Float): overall scalar loss summed across all classes
+        """
+        # initialize loss to zero
+        loss = 0.0
+        
+        for i in range(len(self.pos_weights)):
+            # for each class, add average weighted loss for that class 
+            loss_pos =  torch.mean(self.pos_weights[i] * y_true[:, i] * torch.log(y_pred[:, i] + epsilon))
+            loss_neg =  torch.mean(self.neg_weights[i] * (1 - y_true[:, i]) * torch.log(1 - y_pred[:, i] + epsilon))
+            loss += loss_pos + loss_neg
+        return loss
+
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 print(f'\ndevice: {device}')
     
@@ -37,10 +65,11 @@ parser.add_argument('--bs', type = int, default = 32, help = 'batch size')
 parser.add_argument('--lr', type = float, default = 1e-5, help = 'Learning Rate for the optimizer')
 parser.add_argument('--stage', type = int, default = 1, help = 'Stage, it decides which layers of the Neural Net to train')
 parser.add_argument('--loss_func', type = str, default = 'FocalLoss', choices = {'BCE', 'FocalLoss'}, help = 'loss function')
-parser.add_argument('-r','--resume', default = True ,action = 'store_true') # args.resume will return True if -r or --resume is used in the terminal
+parser.add_argument('-r','--resume', default = False ,action = 'store_true') # args.resume will return True if -r or --resume is used in the terminal
 parser.add_argument('--ckpt', type = str, help = 'Path of the ckeckpoint that you wnat to load')
 parser.add_argument('-t','--test', action = 'store_true')   # args.test   will return True if -t or --test   is used in the terminal
 args = parser.parse_args()
+disease = ['Atelectasis', 'Cardiomegaly', 'Consolidation', 'Edema', 'Effusion', 'Emphysema', 'Fibrosis', 'Hernia', 'Infiltration', 'Mass', 'No Finding', 'Nodule', 'Pleural_Thickening', 'Pneumonia', 'Pneumothorax']
 
 args.ckpt = 'C:/Users/hb/Desktop/code/FL_distribution_skew/models/stage4_1e-05_12.pth'
 
@@ -75,9 +104,55 @@ def count_parameters(model):
 
 # make the datasets
 XRayTrain_dataset = XRaysTrainDataset(data_dir, transform = config.transform)
+GANTrain_dataset = GANData()
+
+ori_ds_cnt = XRayTrain_dataset.get_ds_cnt()
+gan_ds_cnt = GANTrain_dataset.get_ds_cnt()
+
+total_ds_cnt = np.array(ori_ds_cnt) + np.array(gan_ds_cnt)
+
+pos_freq = total_ds_cnt / total_ds_cnt.sum()
+neg_freq = 1 - pos_freq
+
+pos_weights = neg_freq
+neg_weights = pos_freq
+
+# Plot the disease distribution
+plt.figure(figsize=(8,4))
+plt.title('Disease Distribution', fontsize=20)
+plt.bar(disease,total_ds_cnt)
+plt.tight_layout()
+plt.gcf().subplots_adjust(bottom=0.40)
+plt.xticks(rotation = 90)
+plt.xlabel('Deseases')
+plt.savefig('disease_distribution.png')
+plt.clf()
+
+#Plot the pos neg balancing
+bar_width = 0.25
+x = np.arange(len(disease))
+#Before
+# plt.figure(figsize=(8,8))
+plt.title('Pos Neg Distribution', fontsize=20)
+plt.bar(x,pos_freq, bar_width)
+plt.bar(x +  bar_width,neg_freq, bar_width)
+plt.xticks(x, disease, rotation = 90)
+plt.savefig('before_balancing.png')
+plt.clf()
+#After
+# plt.figure(figsize=(8,8))
+plt.title('Pos Neg Distribution', fontsize=20)
+plt.bar(x,pos_freq*pos_weights,  bar_width)
+plt.bar(x + bar_width,neg_freq*neg_weights, bar_width)
+plt.xticks(x, disease, rotation = 90)
+plt.savefig('after_balancing.png')
+plt.clf()
+
 # XRayTrain_dataset = ChestXLoader(0, mode = 'train')
+XRayTrain_dataset = torch.utils.data.ConcatDataset([XRayTrain_dataset, GANTrain_dataset])
 train_percentage = 0.8
 train_dataset, val_dataset = torch.utils.data.random_split(XRayTrain_dataset, [int(len(XRayTrain_dataset)*train_percentage), len(XRayTrain_dataset)-int(len(XRayTrain_dataset)*train_percentage)])
+
 
 XRayTest_dataset = XRaysTestDataset(data_dir, transform = config.transform)
 # XRayTest_dataset = ChestXLoader(mode = 'test')
@@ -93,6 +168,7 @@ batch_size = args.bs # 128 by default
 train_loader = torch.utils.data.DataLoader(train_dataset, batch_size = batch_size, shuffle = True)
 val_loader = torch.utils.data.DataLoader(val_dataset, batch_size = batch_size, shuffle = not True)
 test_loader = torch.utils.data.DataLoader(XRayTest_dataset, batch_size = batch_size, shuffle = not True)
+train2_loader = torch.utils.data.DataLoader(GANTrain_dataset, batch_size = batch_size, shuffle = not True)
 
 print('\n-----Initial Batchloaders Information -----')
 print('num batches in train_loader: {}'.format(len(train_loader)))
@@ -101,8 +177,8 @@ print('num batches in test_loader : {}'.format(len(test_loader)))
 print('-------------------------------------------')
 
 #  sanity check
-if len(XRayTrain_dataset.all_classes) != 15: # 15 is the unique number of diseases in this dataset
-    q('\nnumber of classes not equal to 15 !')
+# if len(XRayTrain_dataset.all_classes) != 15: # 15 is the unique number of diseases in this dataset
+#     q('\nnumber of classes not equal to 15 !')
 
 a,b = train_dataset[0]
 print('\nwe are working with \nImages shape: {} and \nTarget shape: {}'.format( a.shape, b.shape))
@@ -118,6 +194,8 @@ if args.loss_func == 'FocalLoss': # by default
 elif args.loss_func == 'BCE':
     loss_fn = nn.BCEWithLogitsLoss().to(device)
 
+loss_fn = weighted_loss(pos_weights, neg_weights)
+
 # define the learning rate
 lr = args.lr
 
@@ -131,7 +209,7 @@ if not args.test: # training
         # model = ResNet50.resnet56()
         # change the last linear layer
         num_ftrs = model.fc.in_features
-        model.fc = nn.Linear(num_ftrs, len(XRayTrain_dataset.all_classes)) # 15 output classes 
+        model.fc = nn.Linear(num_ftrs, 15) # 15 output classes 
         model.to(device)
         
         print('----- STAGE 1 -----') # only training 'layer2', 'layer3', 'layer4' and 'fc'

@@ -4,6 +4,14 @@ pickles/
 
 result/
 
+results/
+
+generated_img/
+
+logs/
+
 *.txt
 
 *.csv
+
+*.png

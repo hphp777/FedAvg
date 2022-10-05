@@ -9,7 +9,11 @@ import torch
 import torchvision.transforms as transforms
 from imageio import imread
 from PIL import Image, ImageOps
-
+import torchvision.models as models 
+import torch.nn as nn
+from matplotlib import pyplot as plt
+import csv
+import pandas as pd
 
 import config 
 
@@ -121,27 +125,27 @@ class XRaysTrainDataset(Dataset):
 
         # full dataframe including train_val and test set
         self.df = self.get_df()
-        print('self.df.shape: {}'.format(self.df.shape))
+        # print('self.df.shape: {}'.format(self.df.shape))
 
         self.make_pkl_dir(config.pkl_dir_path)
-        print(os.path.join(config.pkl_dir_path, config.train_val_df_pkl_path))
+        # print(os.path.join(config.pkl_dir_path, config.train_val_df_pkl_path))
         # get train_val_df
         if not os.path.exists(os.path.join(config.pkl_dir_path, config.train_val_df_pkl_path)):
 
             self.train_val_df = self.get_train_val_df()
-            print('\nself.train_val_df.shape: {}'.format(self.train_val_df.shape))
+            # print('\nself.train_val_df.shape: {}'.format(self.train_val_df.shape))
 
             # pickle dump the train_val_df
             with open(os.path.join(config.pkl_dir_path, config.train_val_df_pkl_path), 'wb') as handle:
                 pickle.dump(self.train_val_df, handle, protocol = pickle.HIGHEST_PROTOCOL)
-            print('{}: dumped'.format(config.train_val_df_pkl_path))
+            # print('{}: dumped'.format(config.train_val_df_pkl_path))
             
         else:
             # pickle load the train_val_df
             with open(os.path.join(config.pkl_dir_path, config.train_val_df_pkl_path), 'rb') as handle:
                 self.train_val_df = pickle.load(handle)
-            print('\n{}: loaded'.format(config.train_val_df_pkl_path))
-            print('self.train_val_df.shape: {}'.format(self.train_val_df.shape))
+            # print('\n{}: loaded'.format(config.train_val_df_pkl_path))
+            # print('self.train_val_df.shape: {}'.format(self.train_val_df.shape))
 
         self.the_chosen, self.all_classes, self.all_classes_dict = self.choose_the_indices()
     
@@ -151,15 +155,49 @@ class XRaysTrainDataset(Dataset):
                 pickle.dump(self.all_classes, handle, protocol = pickle.HIGHEST_PROTOCOL)
                 print('\n{}: dumped'.format(config.disease_classes_pkl_path))
         else:
-            print('\n{}: already exists'.format(config.disease_classes_pkl_path))
+            pass
+            # print('\n{}: already exists'.format(config.disease_classes_pkl_path))
 
         self.new_df = self.train_val_df.iloc[self.the_chosen, :] # this is the sampled train_val data
-        print('\nself.all_classes_dict: {}'.format(self.all_classes_dict))
+
+        self.disease_cnt = [0]*15
+
+        for i in range(len(self.new_df)):
+            row = self.new_df.iloc[i, :]
+            labels = str.split(row['Finding Labels'], '|')
+            for lab in labels:
+                lab_idx = self.all_classes.index(lab)
+                self.disease_cnt[lab_idx] += 1
+
+    def get_ds_cnt(self):
+        return self.disease_cnt
+
+        # print('\nself.all_classes_dict: {}'.format(self.all_classes_dict))
             
+    def compute_class_freqs(self):
+        """
+        Compute positive and negative frequences for each class.
+
+        Args:
+            labels (np.array): matrix of labels, size (num_examples, num_classes)
+        Returns:
+            positive_frequencies (np.array): array of positive frequences for each
+                                          class, size (num_classes)
+            negative_frequencies (np.array): array of negative frequences for each
+                                          class, size (num_classes)
+        """    
+        # total number of patients (rows)
+        labels = self.train_val_df
+        N = labels.shape[0]
+        positive_frequencies = (labels.sum(axis = 0))/N
+        negative_frequencies = 1.0 - positive_frequencies
+    
+        return positive_frequencies, negative_frequencies
+
     def resample(self):
         self.the_chosen, self.all_classes, self.all_classes_dict = self.choose_the_indices()
         self.new_df = self.train_val_df.iloc[self.the_chosen, :]
-        print('\nself.all_classes_dict: {}'.format(self.all_classes_dict))
+        # print('\nself.all_classes_dict: {}'.format(self.all_classes_dict))
 
     def make_pkl_dir(self, pkl_dir_path):
         if not os.path.exists(pkl_dir_path):
@@ -265,7 +303,7 @@ class XRaysTrainDataset(Dataset):
     
     def get_df(self):
         csv_path = os.path.join(self.data_dir, 'Data_Entry_2017.csv')
-        print('\n{} found: {}'.format(csv_path, os.path.exists(csv_path)))
+        # print('\n{} found: {}'.format(csv_path, os.path.exists(csv_path)))
         
         all_xray_df = pd.read_csv(csv_path)
 
@@ -294,7 +332,6 @@ class XRaysTestDataset(Dataset):
 
         # full dataframe including train_val and test set
         self.df = self.get_df()
-        print('\nself.df.shape: {}'.format(self.df.shape))
 
         self.make_pkl_dir(config.pkl_dir_path)
 
@@ -306,7 +343,7 @@ class XRaysTestDataset(Dataset):
         if not os.path.exists(os.path.join(config.pkl_dir_path, config.test_df_pkl_path)):
 
             self.test_df = self.get_test_df()
-            print('self.test_df.shape: ', self.test_df.shape)
+            # print('self.test_df.shape: ', self.test_df.shape)
             
             # pickle dump the test_df
             with open(os.path.join(config.pkl_dir_path, config.test_df_pkl_path), 'wb') as handle:
@@ -316,8 +353,8 @@ class XRaysTestDataset(Dataset):
             # pickle load the test_df
             with open(os.path.join(config.pkl_dir_path, config.test_df_pkl_path), 'rb') as handle:
                 self.test_df = pickle.load(handle)
-            print('\n{}: loaded'.format(config.test_df_pkl_path))
-            print('self.test_df.shape: {}'.format(self.test_df.shape))
+            # print('\n{}: loaded'.format(config.test_df_pkl_path))
+            # print('self.test_df.shape: {}'.format(self.test_df.shape))
 
     def __getitem__(self, index):
         row = self.test_df.iloc[index, :]
@@ -358,14 +395,14 @@ class XRaysTestDataset(Dataset):
         test_list = self.get_test_list()
 
         test_df = pd.DataFrame()
-        print('\nbuilding test_df...')
+        # print('\nbuilding test_df...')
         for i in tqdm(range(self.df.shape[0])):
             filename  = os.path.basename(self.df.iloc[i,0])
             # print('filename: ', filename)
             if filename in test_list:
                 test_df = test_df.append(self.df.iloc[i:i+1, :])
          
-        print('test_df.shape: ', test_df.shape)
+        # print('test_df.shape: ', test_df.shape)
 
         return test_df
 
@@ -377,7 +414,57 @@ class XRaysTestDataset(Dataset):
     def __len__(self):
         return len(self.test_df)
 
+class GANData(Dataset):
 
+    def __init__(self):
+        self.device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        self.dataList = glob.glob("C:/Users/hb/Desktop/code/FedAvg/generated_img/*")
+        self.model = models.resnet50(pretrained=True)
+        num_ftrs = self.model.fc.in_features
+        self.model.fc = nn.Linear(num_ftrs, 15) # 15 output classes 
+        self.model.to(self.device)
+        self.model.load_state_dict(torch.load("C:/Users/hb/Desktop/code/FedAvg/models/server/CZ/server_0.pth"))
+        self.sigmoid = torch.nn.Sigmoid()
+        self.gan = pd.read_csv('gan_data.csv')
+
+    def get_ds_cnt(self):
+        ds_cnt = [0] * 14
+        for row in range(len(self.gan)):
+            for i in range(1,15):
+                ds_cnt[i-1] += self.gan.iloc[row][i]
+        ds_cnt.insert(10,0)
+        return ds_cnt
+
+    def __getitem__(self, idx):
+
+        line = self.gan.iloc[idx]
+        img = cv2.imread(line[0])
+
+        transform0 = config.transform
+        img = transform0(img)
+        img = img.to(self.device)
+        # img_temp = img.unsqueeze(dim = 0)
+        # out = self.model(img_temp)
+        # out = self.sigmoid(out)
+        # print(out)
+        # out = out.cpu().detach().numpy()
+
+        # out[out >= 0.3] = 1
+        # out[out < 0.3] = 0
+
+        label = [0] * 14
+        for i in range(1,15):
+            label[i-1] = line[i]
+        label.insert(10,0)
+        label = torch.tensor(label)
+        img = img.cpu()
+
+        label = label.squeeze()
+
+        return img, label
+        
+    def __len__(self):
+        return len(self.dataList)
 
 
 

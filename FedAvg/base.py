@@ -8,16 +8,19 @@ import cv2
 import torch
 import torch.nn as nn
 import torchvision.models as models 
+import importlib
+importlib.reload(models)
 from model.resnet import ResNet50_fedalign, ResNet50
 
 # import custom dataset classes
-from datasets import XRaysTrainDataset  ,ChestXLoader
+from datasets import XRaysTrainDataset  ,ChestXLoader,  GANData
 from datasets import XRaysTestDataset
 
 # import neccesary libraries for defining the optimizers
 import torch.optim as optim
 
 from trainer import fit
+import matplotlib.pyplot as plt
 import config
 
 import warnings
@@ -49,6 +52,8 @@ class server():
 
         # select model
         self.model = models.resnet50(pretrained=True)
+        num_ftrs = self.model.fc.in_features
+        self.model.fc = nn.Linear(num_ftrs, 15) # 15 output classes 
         # self.model = ResNet50.resnet56()
         self.model.to(self.device)
         
@@ -59,7 +64,6 @@ class server():
         train_percentage = 0.8
         XRayTrain_dataset = XRaysTrainDataset(data_dir, transform = config.transform)
         XRayTest_dataset = XRaysTestDataset(data_dir, transform = config.transform)
-        self.test_loader = torch.utils.data.DataLoader(XRayTest_dataset, batch_size = 32, shuffle = not True)
         
         train_dataset, val_dataset = torch.utils.data.random_split(XRayTrain_dataset, [int(len(XRayTrain_dataset)*train_percentage), len(XRayTrain_dataset)-int(len(XRayTrain_dataset)*train_percentage)])
         self.train_loader = torch.utils.data.DataLoader(train_dataset, batch_size = self.batch_size, shuffle = True)
@@ -75,7 +79,7 @@ class server():
 
     def test(self,weight):
 
-        ckpt = 'C:/Users/hb/Desktop/code/FL_distribution_skew/models/C0_stage1_1e-05.pth'
+        ckpt = 'C:/Users/hb/Desktop/code/FedAvg/models/C0_stage1_1e-05.pth'
 
         if ckpt == None:
             q('ERROR: Please select a checkpoint to load the testing model from')
@@ -97,13 +101,42 @@ class server():
         XRayTrain_dataset = XRaysTrainDataset(data_dir, transform = config.transform)
         XRayTest_dataset = XRaysTestDataset(data_dir, transform = config.transform)
 
-        fit(self.device, XRayTest_dataset, self.train_loader, self.val_loader,    
+        auc, acc = fit(self.device, XRayTest_dataset, self.train_loader, self.val_loader,    
                                         self.test_loader, self.model, self.loss_fn, 
                                         self.optimizer, losses_dict,
                                         epochs_till_now = epochs_till_now, epochs = 3,
                                         log_interval = 25, save_interval = 1,
                                         lr = self.lr, bs = self.batch_size, stage = self.stage,
                                         test_only = self.args.test)
+        
+        return auc, acc
+
+class weighted_loss():
+
+    def __init__(self, pos_weights, neg_weights):
+        self.pos_weights = pos_weights
+        self.neg_weights = neg_weights
+
+    def __call__(self, y_true, y_pred, epsilon=1e-7):
+        """
+        Return weighted loss value. 
+
+        Args:
+            y_true (Tensor): Tensor of true labels, size is (num_examples, num_classes)
+            y_pred (Tensor): Tensor of predicted labels, size is (num_examples, num_classes)
+        Returns:
+            loss (Float): overall scalar loss summed across all classes
+        """
+        # initialize loss to zero
+        loss = 0.0
+        
+        for i in range(len(self.pos_weights)):
+            # for each class, add average weighted loss for that class 
+            loss_pos =  torch.mean(self.pos_weights[i] * y_true[:, i] * torch.log(y_pred[:, i] + epsilon))
+            loss_neg =  torch.mean(self.neg_weights[i] * (1 - y_true[:, i]) * torch.log(1 - y_pred[:, i] + epsilon))
+            loss += loss_pos + loss_neg
+        return loss
+
 
 class client():
 
@@ -120,6 +153,8 @@ class client():
         parser.add_argument('--ckpt', type = str, help = 'Path of the ckeckpoint that you wnat to load')
         parser.add_argument('-t','--test', action = 'store_true')   # args.test   will return True if -t or --test   is used in the terminal
         self.args = parser.parse_args()
+        disease = ['Atelectasis', 'Cardiomegaly', 'Consolidation', 'Edema', 'Effusion', 'Emphysema', 'Fibrosis', 'Hernia', 'Infiltration', 'Mass', 'No Finding', 'Nodule', 'Pleural_Thickening', 'Pneumonia', 'Pneumothorax']
+
 
         # define the learning rate
         self.c_num = c_num
@@ -133,7 +168,6 @@ class client():
         num_ftrs = self.model.fc.in_features
         self.model.fc = nn.Linear(num_ftrs, 15) # 15 output classes 
         self.model.to(self.device)
-        print(self.model.parameters())
         self.batch_size = self.args.bs
         self.device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
         data_dir = "C:/Users/hb/Desktop/data/archive"
@@ -142,9 +176,22 @@ class client():
         # mention the path of the data
         self.XRayTrain_dataset = dataloader
         XRayTest_dataset = XRaysTestDataset(data_dir, transform = config.transform)
-        self.dataset = self.XRayTrain_dataset
+        self.GANTrain_dataset = GANData()
+        self.Total_dataset = torch.utils.data.ConcatDataset([self.XRayTrain_dataset, self.GANTrain_dataset])
+        self.dataset = self.Total_dataset
         train_percentage = 0.8
-        train_dataset, val_dataset = torch.utils.data.random_split(self.XRayTrain_dataset, [int(len(self.XRayTrain_dataset)*train_percentage), len(self.XRayTrain_dataset)-int(len(self.XRayTrain_dataset)*train_percentage)])
+        train_dataset, val_dataset = torch.utils.data.random_split(self.dataset, [int(len(self.dataset)*train_percentage), len(self.dataset)-int(len(self.dataset)*train_percentage)])
+
+        ori_ds_cnt = self.XRayTrain_dataset.get_ds_cnt()
+        gan_ds_cnt = self.GANTrain_dataset.get_ds_cnt()
+
+        total_ds_cnt = np.array(ori_ds_cnt) + np.array(gan_ds_cnt)
+
+        pos_freq = total_ds_cnt / total_ds_cnt.sum()
+        neg_freq = 1 - pos_freq
+
+        pos_weights = neg_freq
+        neg_weights = pos_freq
 
         batch_size = self.args.bs # 128 by default
         self.train_loader = torch.utils.data.DataLoader(train_dataset, batch_size = batch_size, shuffle = True)
@@ -163,6 +210,21 @@ class client():
             self.loss_fn = FocalLoss(device = self.device, gamma = 2.).to(self.device)
         elif self.args.loss_func == 'BCE':
             self.loss_fn = nn.BCEWithLogitsLoss().to(self.device)
+        
+        self.loss_fn = weighted_loss(pos_weights, neg_weights)
+
+        # Plot the disease distribution
+        plt.figure(figsize=(8,4))
+        plt.title('Client{}Disease Distribution'.format(c_num), fontsize=20)
+        plt.bar(disease,total_ds_cnt)
+        plt.tight_layout()
+        plt.gcf().subplots_adjust(bottom=0.40)
+        plt.xticks(rotation = 90)
+        plt.xlabel('Deseases')
+        plt.savefig('Client{}_disease_distribution.png'.format(c_num))
+        plt.clf()
+
+
 
     def count_parameters(self, model): 
         num_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -173,13 +235,22 @@ class client():
         sys.exit()
 
     def staging(self, stage = 1, resume = True, ckpt = None, c_num = None):
+
         # initialize the model if not args.resume
         self.stage = stage
         self.args.resume = resume
         self.args.ckpt = ckpt
+        
+        # mention the path of the data
+        train_percentage = 0.8
+        train_dataset, val_dataset = torch.utils.data.random_split(self.XRayTrain_dataset, [int(len(self.XRayTrain_dataset)*train_percentage), len(self.XRayTrain_dataset)-int(len(self.XRayTrain_dataset)*train_percentage)])
+
+        batch_size = self.args.bs # 128 by default
+        self.train_loader = torch.utils.data.DataLoader(train_dataset, batch_size = batch_size, shuffle = True)
+        self.val_loader = torch.utils.data.DataLoader(val_dataset, batch_size = batch_size, shuffle = not True)
 
         if not self.args.resume:
-            print('\ntraining from scratch')
+            print('training from scratch')
             # import pretrained model
             # change the last linear layer
 
@@ -201,7 +272,7 @@ class client():
             if self.args.ckpt == None:
                 self.q('ERROR: Please select a valid checkpoint to resume from')
             
-            print('\nckpt loaded: {}'.format(self.args.ckpt))
+            # print('\nckpt loaded: {}'.format(self.args.ckpt))
             ckpt = torch.load(os.path.join(config.models_dir, self.args.ckpt)) 
 
             # since we are resuming the training of the model
@@ -213,11 +284,6 @@ class client():
             losses_dict = ckpt['losses_dict']
 
         # printing some hyperparameters
-        print('\n> loss_fn: {}'.format(self.loss_fn))
-        print('> epochs_till_now: {}'.format(epochs_till_now))
-        print('> batch_size: {}'.format(self.batch_size))
-        print('> stage: {}'.format(self.stage))
-        print('> lr: {}'.format(self.lr))
 
         if (not self.args.test) and (self.args.resume):
 
@@ -269,14 +335,14 @@ class client():
                     layer_name = str.split(name, '.')[0]
                     if layer_name not in trainable_layers: 
                         trainable_layers.append(layer_name)
-            print('\nfollowing are the trainable layers...')
+            print('following are the trainable layers...')
             print(trainable_layers)
 
-            print('\nwe have {} Million trainable parameters here in the {} model'.format(self.count_parameters(self.model), self.model.__class__.__name__))
+            # print('\nwe have {} Million trainable parameters here in the {} model'.format(self.count_parameters(self.model), self.model.__class__.__name__))
         
         self.optimizer = optim.Adam(filter(lambda p: p.requires_grad, self.model.parameters()), lr = self.lr)
 
-        print("Client{} Data Number".format(self.c_num),len(self.train_loader))
+        # print("Client{} Data Number".format(self.c_num),len(self.train_loader))
 
         weight = fit(self.device, self.dataset, self.train_loader, self.val_loader,    
                                         self.test_loader, self.model, self.loss_fn, 
@@ -289,10 +355,10 @@ class client():
         return weight
 
     def train(self, updated = False, weight = None):
-        print("Client" + str(self.c_num) + " Staging==============================================")
+        print("\nClient" + str(self.c_num) + " Staging==============================================")
         if updated == True:
             self.model.load_state_dict(weight)
         weight = self.staging(stage = 1, resume = False, c_num = self.c_num)
-        for i in range(2,5):
-            weight = self.staging(stage = i, resume = True, ckpt = 'C{}_stage{}_1e-05.pth'.format(self.c_num, i-1))
+        # for i in range(2,5):
+        #     weight = self.staging(stage = i, resume = True, ckpt = 'C{}_stage{}_1e-05.pth'.format(self.c_num, i-1))
         return weight
