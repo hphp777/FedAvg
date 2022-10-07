@@ -26,7 +26,6 @@ def get_loader(image_size):
         [
             transforms.Resize((image_size, image_size)),
             transforms.ToTensor(),
-            transforms.RandomHorizontalFlip(p=0.5),
             transforms.Normalize(
                 [0.5 for _ in range(config.CHANNELS_IMG)],
                 [0.5 for _ in range(config.CHANNELS_IMG)],

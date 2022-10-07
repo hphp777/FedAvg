@@ -141,10 +141,11 @@ def CZ():
 
     for i in range(20):
 
+        print("Epoch{}".format(i))
         weight = clients[0].train()
         auc, acc = central_server.test(weight)
 
-        # torch.save(weight, 'C:/Users/hb/Desktop/code/FedAvg/models/server/CZ/server_' + str(i) + '.pth' )
+        torch.save(weight, 'C:/Users/hb/Desktop/code/FedAvg/models/server/CZ/server_' + str(i) + '.pth' )
     
         if auc > best_auc:
             best_auc = auc

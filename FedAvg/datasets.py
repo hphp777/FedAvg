@@ -418,13 +418,13 @@ class GANData(Dataset):
 
     def __init__(self):
         self.device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-        self.dataList = glob.glob("C:/Users/hb/Desktop/code/FedAvg/generated_img/*")
-        self.model = models.resnet50(pretrained=True)
-        num_ftrs = self.model.fc.in_features
-        self.model.fc = nn.Linear(num_ftrs, 15) # 15 output classes 
-        self.model.to(self.device)
-        self.model.load_state_dict(torch.load("C:/Users/hb/Desktop/code/FedAvg/models/server/CZ/server_0.pth"))
-        self.sigmoid = torch.nn.Sigmoid()
+        self.dataList = glob.glob("C:/Users/hb/Desktop/data/generated_img/*.png")
+        # self.model = models.resnet50(pretrained=True)
+        # num_ftrs = self.model.fc.in_features
+        # self.model.fc = nn.Linear(num_ftrs, 15) # 15 output classes 
+        # self.model.to(self.device)
+        # self.model.load_state_dict(torch.load("C:/Users/hb/Desktop/code/FedAvg/models/server/CZ/server_0.pth"))
+        # self.sigmoid = torch.nn.Sigmoid()
         self.gan = pd.read_csv('gan_data.csv')
 
     def get_ds_cnt(self):

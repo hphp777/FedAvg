@@ -205,12 +205,14 @@ def train_epoch(device, train_loader, model, loss_fn, optimizer, epochs_till_now
         t_feats, out = model.extract_feature(img)
         # out = model(img)  
 
-        # loss = loss_fn(out, target)
-        sig_out = sigmoid(out).cpu().detach().numpy()
-        loss = loss_fn(sig_out, target)
+        loss = loss_fn(out, target)
+        # sig_out = sigmoid(out)
+        # loss = loss_fn(sig_out, target)
         loss_ori = loss
         running_train_loss += loss*img.shape[0]
         train_loss_list.append(loss.item())
+        # weighted
+        # train_loss_list.append(loss.cpu().detach().numpy())
 
         preds = np.round(sigmoid(out).cpu().detach().numpy())
         targets = target.cpu().detach().numpy()
@@ -288,7 +290,9 @@ def val_epoch(device, val_loader, model, loss_fn, epochs_till_now = None, final_
             img = img.to(device)
             target = target.to(device)    
     
-            out = model(img)        
+            out = model(img)       
+            # sig_out = sigmoid(out) 
+            # loss = loss_fn(sig_out, target) 
             loss = loss_fn(out, target)    
 
             preds = np.round(sigmoid(out).cpu().detach().numpy())
@@ -298,7 +302,9 @@ def val_epoch(device, val_loader, model, loss_fn, epochs_till_now = None, final_
             correct += (preds == targets).sum()
 
             running_val_loss += loss.item()*img.shape[0]
-            val_loss_list.append(loss.item())
+            # val_loss_list.append(loss.item())
+            # weighted
+            val_loss_list.append(loss.cpu().detach().numpy())
 
             # storing model predictions for metric evaluat`ion 
             probs[k: k + out.shape[0], :] = out.cpu()
@@ -389,7 +395,7 @@ def fit(device, XRayTrain_dataset, train_loader, val_loader, test_loader, model,
 
             print('\ncheckpoint {} saved'.format(save_path))
 
-            make_plot(epoch_train_loss, epoch_val_loss, total_train_loss_list, total_val_loss_list, save_name)
+            # make_plot(epoch_train_loss, epoch_val_loss, total_train_loss_list, total_val_loss_list, save_name)
             print('loss plots saved !!!')
 
         print('\nTRAIN LOSS : {}'.format(mean_running_train_loss))

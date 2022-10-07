@@ -132,9 +132,10 @@ class weighted_loss():
         
         for i in range(len(self.pos_weights)):
             # for each class, add average weighted loss for that class 
-            loss_pos =  torch.mean(self.pos_weights[i] * y_true[:, i] * torch.log(y_pred[:, i] + epsilon))
-            loss_neg =  torch.mean(self.neg_weights[i] * (1 - y_true[:, i]) * torch.log(1 - y_pred[:, i] + epsilon))
+            loss_pos = -1* torch.mean(self.pos_weights[i] * y_true[:, i] * torch.log(y_pred[:, i] + epsilon))
+            loss_neg = -1*torch.mean(self.neg_weights[i] * (1 - y_true[:, i]) * torch.log(1 - y_pred[:, i] + epsilon))
             loss += loss_pos + loss_neg
+            # print(loss)
         return loss
 
 
@@ -184,8 +185,10 @@ class client():
 
         ori_ds_cnt = self.XRayTrain_dataset.get_ds_cnt()
         gan_ds_cnt = self.GANTrain_dataset.get_ds_cnt()
+        # print(gan_ds_cnt)
 
         total_ds_cnt = np.array(ori_ds_cnt) + np.array(gan_ds_cnt)
+        # print(total_ds_cnt)
 
         pos_freq = total_ds_cnt / total_ds_cnt.sum()
         neg_freq = 1 - pos_freq
@@ -197,6 +200,9 @@ class client():
         self.train_loader = torch.utils.data.DataLoader(train_dataset, batch_size = batch_size, shuffle = True)
         self.val_loader = torch.utils.data.DataLoader(val_dataset, batch_size = batch_size, shuffle = not True)
         self.test_loader = torch.utils.data.DataLoader(XRayTest_dataset, batch_size = batch_size, shuffle = not True)
+
+        #print(len(self.XRayTrain_dataset))
+        #print(len(self.XRayTrain_dataset)+len(self.GANTrain_dataset))
 
         print('\n-----Initial Dataset Information({})-----'.format(self.c_num))
         print('num images in train_dataset   : {}'.format(len(train_dataset)))
@@ -211,7 +217,7 @@ class client():
         elif self.args.loss_func == 'BCE':
             self.loss_fn = nn.BCEWithLogitsLoss().to(self.device)
         
-        self.loss_fn = weighted_loss(pos_weights, neg_weights)
+        # self.loss_fn = weighted_loss(pos_weights, neg_weights)
 
         # Plot the disease distribution
         plt.figure(figsize=(8,4))
